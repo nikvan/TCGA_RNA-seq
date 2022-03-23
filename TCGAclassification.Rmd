@@ -1,0 +1,450 @@
+---
+title: "Analysis and Classification of The Cancer Genome Atlas Data"
+output: html_notebook
+---
+LVF601M Inngangur að kerfislíffræði (Introduction to Systems Biology)   
+Háskóli Íslands (University of Iceland)   
+Instructor: Nikolas VanKeersbilck   
+Contact: nlv2(at)hi.is   
+
+**Overview:**   
+
+This exercise will show how to download clinical and genomic data from The Cancer Genome Atlas (TGCA) and how to perform one of the most common analyses in bioinformatics, differential gene expression analysis. The results from differential expression will be applied to the normalized counts file in order to keep only the significant genes. This filtered counts file will be split into testing and training datasets and a classifier will be built to determine if the expression data of patients in the test set might have colon cancer or not. 
+
+Here is an overview of the analysis: 
+```{r}
+ knitr::include_graphics('./Images/TCGA_0.2.png')
+```
+**NOTE:** You can choose to run this script if you want, however it is not a prerequisite for the homework. You will be given everything you need for the homework in a separate file. Some of these steps can be computationally intensive and the datasets are farily large. 
+
+Before anything, set the directory on your machine where we will be working and saving files. The setwd command sets the working directory and the getwd command checks to see what the current working directory is. If you want to run this, set it to your working directory. 
+```{r}
+getwd()
+setwd("/Users/nikolasvankeersbilck/Desktop/TCGA")
+getwd()
+```
+
+# 0. Load Libraries  
+First, we need to load the libraries necessary for this exercise. Please check their documentation if you want to know more about what each does specifically. If you wish to run this code on your own, uncomment the install commands if you need to install these.  
+```{r}
+#BiocManager::install("TCGAbiolinks")
+library(TCGAbiolinks)
+#BiocManager::install("SummarizedExperiment")
+library(SummarizedExperiment)
+#install.packages("RColorBrewer")
+library(RColorBrewer)
+#BiocManager::install("DESeq2")
+library(DESeq2)
+#BiocManager::install("biomaRt")
+library(biomaRt)
+#BiocManager::install("rhdf5")
+library(rhdf5)
+#BiocManager::install("apeglm")
+library(apeglm)
+#install.packages("tidyverse")
+library(tidyverse)
+#install.packages('class')
+library(class)
+#install.packages('caret')
+library(caret)
+library(ggplot2)
+library(knitr)
+```
+
+# 1. Get TCGA Data  
+```{r}
+ knitr::include_graphics('./Images/TCGA_1.png')
+```
+In this tutorial, we will examine data from TCGA on colorectal cancer. In TCGA, this dataset is identified as COAD. The dataset contains information for 461 cases including: clinical, expression, DNA methylation and genotyping data.  
+
+The Cancer Genome Atlas is a service of the National Cancer Institute at the National Institute of Health in Bethesda, Maryland, USA.  
+
+Further information on the dataset can be found here: https://portal.gdc.cancer.gov/projects/TCGA-COAD
+
+We will use the TCGAbiolinks library to interact with TCGA. TCGAbiolinks provides important functionality and provides data structures to make its analysis in R easy.
+
+To download TCGA data with TCGAbiolinks, we need to follow 3 steps. First, we will query the TCGA database through R with the function GDCquery. This will allow us to investigate the data available in TCGA database. Next, we use GDCdownload to download the raw version of the desired files onto our computer. Finally GDCprepare will read these files and make R data structures so that we can further analyze them.
+
+GDC stands for Genomic Data Commons and this group decides how to process and distribute genomic, clinical, and biospecimen data from various research programs, both US Government and external. The documentation for the GDC can be found at the link: https://docs.gdc.cancer.gov/Data/Introduction/   
+
+First, we can check all the available projects at TCGA with the command below. We will just look at the first 6 projects using the command head().
+
+```{r}
+GDCprojects <- getGDCprojects()
+head(GDCprojects[c("project_id", "name")])
+dim(GDCprojects)
+```
+As a general rule in R, whenever some method returns some value or table you are not familiar with, you should check its structure and dimensions. You can always use functions such as head() to only show the first entries and dim() to check the dimension of the data.
+
+We can use the following function to get details on all data deposited for TCGA-COAD. 
+```{r}
+TCGAbiolinks:::getProjectSummary("TCGA-COAD")
+```
+
+In the output, we can see that not all patients were measured for all data types. Also, some data types have more files than samples. This is the case when more experiments were performed per patient, i.e. transcriptome profiling was performed both in mRNA and miRNA, or that data has been analyzed by distinct computational strategies.
+
+We will start by querying all RNA-seq data in the dataset. When using GDCquery we always need to specify the id of the project, i.e. “TCGA-COAD”, and the data category we are interested in, i.e. “Transcriptome Profiling”. Here, we will focus on a particular type of data summarization for mRNA-seq data (workflow.type), which is based on raw counts estimated with HTSeq. HTSeq is a Python package that calculates the number of mapped reads to each gene. This step has already been run for us. 
+
+Note that this query may take a few of minutes.   
+
+HTSeq- Counts are un-normalized counts, there are ways to get already normalized counts in the form of FPKM (Fragments Per Kilobase Million) but we will not do this. 
+```{r}
+query_TCGA = GDCquery(
+  project = "TCGA-COAD",
+  data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "HTSeq - Counts")
+```
+To visualize the query results in a more readable way, we can use the command getResults.
+```{r}
+coad_res = getResults(query_TCGA) # make results as table
+head(coad_res) # data of the first 6 patients.
+```
+```{r}
+colnames(coad_res) # columns present in the table
+```
+We need to know the sample type of each case in the dataset (Primary Tumor, Solid Tissue Normal, Recurrent Tumor, or Metastatic). This information is present in the column “sample_type”.
+```{r}
+sample_type <- coad_res$sample_type
+unique(sample_type) #See the different options
+```
+We are not going to need all the data in the set for this exercise, so we will rerun our query with just Primary Tumor and Solid Tissue Normal
+```{r}
+query_TCGA = GDCquery(
+  project = "TCGA-COAD",
+  data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "HTSeq - Counts",
+  sample.type = c("Primary Tumor", "Solid Tissue Normal"))
+```
+Next, we need to download the files from the query. Before, be sure that you set your current working directory to the place you want to save your data. TCGA will save the data in a directory structure starting with a directory “GDCdata”.
+```{r}
+getwd()
+```
+Download the files specified in the query. This may take a while... be patient. 
+```{r}
+GDCdownload(query = query_TCGA)
+```
+Now that we have downloaded the data we want, we will use GDCprepare to read these files and make R data structures so that we can further analyze them. This command can also take a while. 
+```{r}
+tcga_data = GDCprepare(query_TCGA)
+```
+Our variable tcga_data is in the form of a SummarizedExperiment object. The SummarizedExperiment class is used to store rectangular matrices of experimental results, which are commonly produced by sequencing and microarray experiments. This object stores both clinical and gene expression data. More on the structure of this object can be found at the link: 
+https://www.bioconductor.org/packages/devel/bioc/vignettes/SummarizedExperiment/inst/doc/SummarizedExperiment.html#anatomy-of-a-summarizedexperiment
+
+We can then check the size of the object with the command.
+```{r}
+dim(tcga_data)
+```
+There are 3 functions that allow us to access the most important data present in this object, these are: colData(), rowData(), assays(). colData() allows us to access the clinical data associated with our samples. The functions colnames() and rownames() can be used to extract the column and rows names from a given table respectively.
+```{r}
+colnames(colData(tcga_data))
+```
+Let's look at some potentially interesting features.
+```{r}
+table(tcga_data@colData$vital_status)
+table(tcga_data@colData$definition)
+table(tcga_data@colData$gender)
+table(tcga_data@colData$race)
+```
+We can see that 402 of the individuals were living at the time of the datasets creation and 115 has passed. We have 478 primary solid tumor samples and 41 normal which will be used as control. 519 total
+
+Let's look at the RNA-seq data. We can use the assay function to obtain the RNA-seq count matrices and rowData to see gene mapping information. Can you tell how many genes and how many samples are included there?
+```{r}
+dim(assay(tcga_data))     # gene expression matrices.
+head(assay(tcga_data)[,1:3]) # expression of first 6 genes and first 3 samples
+head(rowData(tcga_data))     # ensembl id and gene id of the first 6 genes.
+```
+The identifier in the form ENSG0... is the genes identifier from the Ensembl database of genes. Next to that is the estimated counts for each sample as given by HTSeq.
+
+Conveniently, we can save objects as a file which we can simply load back into our script later if we want. This allows us to save certain results to this point without having to run the above code again. 
+```{r}
+saveRDS(object = tcga_data,
+        file = "tcga_data.RDS",
+        compress = FALSE)
+
+# We can read the file back in with the command: 
+# tcga_data = readRDS(file = "tcga_data.RDS")
+```
+# 2. RNA-seq Analysis (Bulk)
+```{r}
+ knitr::include_graphics('./Images/TCGA_2.png')
+```
+
+The most common task that researchers preform with RNA-seq data is differential expression analysis. Simply, we want to know what genes are differentially expressed between the control (normal or benign) cases versus the cancerous cases. 
+
+```{r}
+ knitr::include_graphics('./Images/dge.png')
+```
+Although conceptually easy, differential expression analysis is not straightforward since there is both randomness between and within cells (biological variation) and randomness in the experiment (technical variation). 
+
+So actually determining what constitutes significant change is considerably complex. 
+
+Fear not, there is an R package that takes all sources of variation into account and does all the complex normalization steps for us called DESeq2. More information on DESeq2 can be found at: https://bioconductor.org/packages/release/bioc/html/DESeq2.html
+
+DESeq2 works on unnormalized counts. So what is a count? A count is the number of reads over a genomic feature like a gene or a transcript. 
+
+```{r}
+knitr::include_graphics('./Images/counts.png')
+```
+
+We can feed our SummarizedExperiment object created above directly into DESeq2. The constructor function below shows the generation of a DESeqDataSet from a RangedSummarizedExperiment. The variable in our object that denotes the condition of the sample is definition, so we will need to feed this into the constructor as well. 
+```{r}
+ddsSE <- DESeqDataSet(tcga_data, design = ~ definition )
+ddsSE
+```
+### 2.1. Normalize counts for classification
+```{r}
+knitr::include_graphics('./Images/TCGA_2.1.png')
+```
+
+The counts from TCGA are not normalized already, so we will use DESeq2 to normalize them. https://support.bioconductor.org/p/66067/
+```{r}
+dds <- estimateSizeFactors(ddsSE)
+counts <- counts(dds, normalized=TRUE)
+```
+```{r}
+dim(counts)
+```
+
+### 2.2. Filter Counts Matrix by Coding and Non-coding
+```{r}
+knitr::include_graphics('./Images/TCGA_2.2.png')
+```
+
+As we can see, there are quite a few genes in this list. Approximately 56,000. As some of the biologists may be aware, there are only 20,000-25,000 protein coding genes in the human genome, so we obviously have some that are noncoding. Let's just keep those that are protein coding. We can do this by getting information about genes from a service called biomaRt. In this command, we download data from biomaRt that we need. 
+```{r}
+mart <- biomaRt::useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+                         dataset = "hsapiens_gene_ensembl",
+                         host = 'ensembl.org')
+
+t2g <- biomaRt::getBM(attributes = c("ensembl_gene_id","external_gene_name", "description","gene_biotype"), mart = mart)
+```
+Next we can take our counts matrix obtained above and filter out those that are noncoding using a semi join from the package dplyr (included in the tidyverse package). A semi join is a filtering join that returns all rows from x where there are matching values in y, keeping just columns from x.
+
+```{r}
+#filter biomaRt by only those that are protein coding
+t2g <- t2g[which(t2g$gene_biotype == "protein_coding"), ]
+#22,818 genes, much better
+
+#Let's drop genes with no external gene name
+t2g <- t2g[!(t2g$external_gene_name==""),]
+#21,966
+
+counts <- as.data.frame(counts)
+counts$ensembl_gene_id <- row.names(counts)
+
+# Merge the counts dataframe with t2g to filter
+counts <- counts %>% semi_join(t2g, by ="ensembl_gene_id")
+#drop ensembl_gene_id from df
+counts <- subset(counts, select = -c(ensembl_gene_id) )
+
+#convert back to a matrix
+counts <- data.matrix(counts)
+
+```
+```{r}
+dim(counts)
+```
+Now we have just 19,200 genes. Much better. 
+
+We can save the object for easier use later
+```{r}
+saveRDS(object = counts,
+        file = "counts.RDS",
+        compress = FALSE)
+#counts = readRDS(file = "counts.RDS")
+```
+Now, we will continue with differential expression analysis 
+
+### 2.3. Pre-Filtering
+```{r}
+knitr::include_graphics('./Images/TCGA_2.3.png')
+```
+
+Next, we will filter out genes with a low count. Many genes will have a low count, but these are very unlikely to be important in our analysis. While it is not necessary to pre-filter low count genes before running the DESeq2 functions, there are two reasons which make pre-filtering useful: by removing rows in which there are very few reads, we reduce the memory size of the dds data object, and we increase the speed of the transformation and testing functions within DESeq2. Here we perform a minimal pre-filtering to keep only rows that have at least 10 reads total. Note that more strict filtering to increase power is automatically applied via independent filtering on the mean of normalized counts within the results function later on. 
+```{r}
+keep <- rowSums(counts(ddsSE)) >= 10
+ddsSE <- ddsSE[keep,]
+```
+
+### 2.4. Differential Expression Analysis
+```{r}
+knitr::include_graphics('./Images/TCGA_2.4.png')
+```
+
+The standard differential expression analysis steps are wrapped into a single function, DESeq. Results tables are generated using the function results, which extracts a results table with log2 fold changes, p-values and adjusted p-values. This operation takes quite some time (~8min on Quad Core i7 Macbook Pro) to run since there are lots of samples to process. 
+```{r}
+#Uncomment this line to use the prerun version. Make sure the file is in your working directory. 
+# ddsSE = readRDS(file = "ddsSE.RDS")
+ddsSE <- DESeq(ddsSE)
+saveRDS(object = ddsSE,
+        file = "ddsSE.RDS",
+        compress = FALSE)
+```
+We will check the resultsNames for the object just created so we can specify the coefficient or contrast we want to build a results table for. 
+```{r}
+resultsNames(ddsSE) 
+```
+Next, we will get the results from our analysis where the columns are:   
+   - baseMean = the average of the normalized counts taken over all samples   
+   - log2FoldChange = log2 fold change between the groups. E.g. value 2 means that the expression has increased 4-fold   
+   - lfcSE = standard error of the log2FoldChange estimate   
+   - stat = Wald statistic   
+   - pvalue = Wald test p-value   
+   - padj = Benjamini-Hochberg adjusted p-value
+```{r}
+res <- results(ddsSE, name="definition_Solid.Tissue.Normal_vs_Primary.solid.Tumor")
+res
+```
+
+The command summary shows some statistics about the analysis (note this is including non-coding genes since we haven't filtered this one yet). LFC stands for LOG2 Fold-Change between conditions.
+```{r}
+summary(res)
+```
+### 2.5. Filter Results by Significance
+```{r}
+knitr::include_graphics('./Images/TCGA_2.5.png')
+```
+
+Let's do some additional filtering to keep only the results which are significant. This is important because we want to reduce the number of genes we use in our classifier later on. 
+```{r}
+filt1 = res[which(res$pvalue < 0.05), ]
+filt2 = filt1[which(filt1$padj < 0.1), ]
+filt3 = filt2[which(abs(filt2$log2FoldChange) > 1), ]
+print(paste('DEGs found', dim(filt3)[1], sep=' '))
+```
+Again, this is not yet filtered by coding or non-coding, so we will need to do this later.
+
+### 2.6. Transformation and Visualization
+```{r}
+knitr::include_graphics('./Images/TCGA_2.6.png')
+```
+
+For easier visualization and ranking of the genes, we will shrink the effect size (LFC estimates). For this we use a built in function in DESeq2 lfcShrink which uses the apeglm package we loaded before. Don't worry about what shrinkage does. 
+```{r}
+resLFC <- lfcShrink(ddsSE, coef="definition_Solid.Tissue.Normal_vs_Primary.solid.Tumor", type="apeglm")
+resLFC
+```
+Let's order the results table by smallest p-value and view summary:
+```{r}
+resOrdered <- res[order(res$pvalue),]
+summary(res)
+# How many with p<0.01?
+sum(res$padj < 0.1, na.rm=TRUE)
+```
+Now let's transform the count data for visualization. The parameter blind specifies whether the transformation should be blind to the sample information specified by the design formula. We will set this to FALSE. 
+```{r}
+vsd <- vst(ddsSE, blind=FALSE)
+#head(assay(vsd), 3)
+```
+#### PCA
+Let's do Principle Component Analysis. PCA is a clustering method that groups similar samples. More on how this works can be found here: https://biologicalmodeling.org/white_blood_cells/pca
+```{r}
+plotPCA(vsd, "definition") 
+```
+The next step will be to prepare our results table
+```{r}
+DEGs <- filt3
+summary(DEGs)
+DEGs <- as.data.frame(DEGs)
+DEGs <- dplyr::mutate(DEGs, target_id = rownames(DEGs))
+# Now, all of our results are in the dataframe DEGs
+```
+
+### 2.7. Filter DEA Results by Coding and Non-coding and save final results
+```{r}
+knitr::include_graphics('./Images/TCGA_2.7.png')
+```
+
+Now we need to filter our results table from above by coding or noncoding just like we did before for the counts table. 
+
+```{r}
+names(DEGs)[7] <- "ensembl_gene_id"
+DEG2 <- DEGs %>% semi_join(t2g, by ="ensembl_gene_id")
+```
+
+```{r}
+dim(DEG2)
+```
+Now, we have widdled it down to 5,373 genes! Much better.   
+
+Let's save this as a tsv file in case we want to look at it later. 
+```{r}
+write.table(DEG2,file= "Diff_Express_Res.tsv", quote=FALSE, sep='\t', row.names = FALSE )
+```
+
+Now we need to do all the data clean to get the data ready for classification. 
+
+We need to first merge in Sample Type. Sample name and counts are stores in the dataframe counts. Sample type is stored in sample and definition in our tcga_data object
+```{r}
+head(tcga_data@colData$sample)
+head(tcga_data@colData$definition)
+#create a dataframe with these together
+samples <- cbind(data.frame(tcga_data@colData$sample), data.frame(tcga_data@colData$definition))
+head(samples)
+#remove duplicates
+samples <- samples[!duplicated(samples$tcga_data.colData.sample), ]
+samples <- samples %>% remove_rownames %>% column_to_rownames(var="tcga_data.colData.sample") 
+head(samples)
+```
+
+We will next convert our counts matrix to a DataFrame. 
+```{r}
+counts <- as.data.frame(counts)
+```
+We need to delete a few duplicates in the dataset. This must just be some error in the dataset. 
+```{r}
+#delete duplicates
+# ‘TCGA-A6-2674-01A’, ‘TCGA-A6-2684-01A’, ‘TCGA-A6-3809-01A’, ‘TCGA-A6-3810-01A’, ‘TCGA-A6-5656-01A’, ‘TCGA-A6-5659-01A’, ‘TCGA-A6-6650-01A’, ‘TCGA-A6-6780-01A’, ‘TCGA-A6-6781-01A’ 
+#columns to drop
+drops <- c("TCGA-A6-2674-01A-02R-0821-07", "TCGA-A6-2684-01A-01R-1410-07","TCGA-A6-3809-01A-01R-A278-07","TCGA-A6-3810-01A-01R-A278-07","TCGA-A6-5656-01A-21R-1839-07","TCGA-A6-5659-01A-01R-1653-07","TCGA-A6-6650-01A-11R-1774-07","TCGA-A6-6780-01A-11R-1839-07","TCGA-A6-6781-01A-22R-1928-07")
+counts <- counts[ , !(names(counts) %in% drops)]
+```
+
+Now, we will clean up the column names to match our samples df
+```{r}
+count_colnames <- colnames(counts)
+#count_colnames
+count_colnames <- substr( count_colnames , start = 1 , stop = 16 )
+#count_colnames
+colnames(counts) <- count_colnames
+```
+
+Now we can filter out the normalized counts table we created before (already filtered by just coding genes) by whether the gene is significant or not from differential expression analysis. Note: This is a form of feature selection. 
+```{r}
+sig_genes <- rownames(DEG2)
+sig_counts <- counts[rownames(counts) %in% sig_genes, ]
+```
+```{r}
+head(sig_counts[,1:3]) # expression of first 6 genes and first 3 samples
+```
+
+Lastly, we will merge in tissue type. 
+```{r}
+samples <- t(samples)
+merged_data <- rbind(samples, sig_counts)
+
+merged_data <- t(merged_data)
+merged_data <- as.data.frame(merged_data)
+str(merged_data)
+saveRDS(object = merged_data,
+        file = "merged_data.RDS",
+        compress = FALSE)
+
+write.table(merged_data,file= "merged_data.tsv", quote=FALSE, sep='\t', row.names = FALSE )
+
+```
+
+
+
+# 3. Classification
+
+For classification, move into the colab notebook in the google drive. 
+
+## Session Info
+
+```{r}
+sessionInfo()
+```
+
