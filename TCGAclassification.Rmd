@@ -5,7 +5,7 @@ output: html_notebook
 LVF601M Inngangur að kerfislíffræði (Introduction to Systems Biology)   
 Háskóli Íslands (University of Iceland)   
 Instructor: Nikolas VanKeersbilck   
-Contact: nlv2(at)hi.is   
+Contact:    
 
 **Overview:**   
 
